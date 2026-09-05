@@ -996,6 +996,30 @@ void Core::onScreenLockerActiveChanged(bool active)
 }
 
 void Core::onResumeFromSuspend() {
+    // (J) A resume is not user activity, so KIdleTime will never report
+    // resumingFromIdle and the actions that fired before the suspend would stay
+    // parked forever -- no auto-blank, no auto-suspend, for the rest of the
+    // uptime. Release them exactly as onResumingFromIdle() would.
+    std::for_each(m_pendingResumeFromIdleActions.cbegin(),
+                  m_pendingResumeFromIdleActions.cend(),
+                  std::mem_fn(&PowerDevil::Action::onWakeupFromIdle));
+    m_pendingResumeFromIdleActions.clear();
+
+    // ...and force every active action to re-register its idle timeouts. The
+    // Wayland idle notifications are still LATCHED IDLE at this point; only an
+    // addTimeout() for an already-latched timeout makes the patched kidletime
+    // poller destroy and recreate the notification. Without this, DPMS recovers
+    // by accident (it re-registers on the lock-state change that follows a
+    // resume) while SuspendSession and DimDisplay never fire again.
+    for (const QString &action : std::as_const(m_activeActions)) {
+        const auto timeouts = m_actionPool[action]->m_registeredIdleTimeouts;
+        m_actionPool[action]->unregisterIdleTimeouts();
+        for (const auto &timeout : timeouts) {
+            m_actionPool[action]->registerIdleTimeout(timeout);
+        }
+    }
+    qCDebug(POWERDEVIL) << "pdx224 (J): re-armed idle actions after resume";
+
     const int percent = currentChargePercent();
     emitBatteryChargePercentNotification(percent, 1000);
 

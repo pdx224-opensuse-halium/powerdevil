@@ -94,6 +94,14 @@ private:
     // the ONLY place the wake source is visible when last_resume_reason is empty.
     QHash<QString, qint64> m_debugWakeupCounts;
     QStringList m_debugWakeupDelta;
+    // (0/I) /sys/kernel/irq/<n>/per_cpu_count for the input IRQs only, resolved by
+    // the name in <n>/actions so no IRQ number is ever hardcoded. Sampled at
+    // suspend; m_userIrqFired says one of them advanced across the suspend, which
+    // means a human physically pressed something. This is the ONLY positive
+    // evidence of user intent available -- every other path infers absence.
+    QHash<QString, qint64> m_userIrqCounts;
+    QStringList m_userIrqFiredNames;
+    bool m_userIrqFired = false;
     UdevQt::Client *m_udevClient;
 };
 

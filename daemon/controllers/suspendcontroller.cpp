@@ -38,6 +38,10 @@ inline static const QLatin1String s_powerSupplyPath("/sys/class/power_supply");
 // increment on this SoC, so it is the fallback of last resort for attribution.
 inline static const QLatin1String s_debugWakeupSourcesPath("/sys/kernel/debug/wakeup_sources");
 
+// (0/I) genirq per-IRQ counters. These keep counting across suspend, so a
+// delta here is positive evidence rather than an inference.
+inline static const QLatin1String s_irqPath("/sys/kernel/irq");
+
 SuspendController::SuspendController()
     : QObject()
 {
@@ -228,6 +232,59 @@ void SuspendController::snapshotWakeupCounts(bool active)
         }
     }
 
+    // (0/I) sample the input IRQs. Resolved by name every time rather than cached:
+    // IRQ numbers are assigned at probe and are not stable across boots, so a
+    // hardcoded number would silently point at an unrelated device.
+    {
+        QHash<QString, qint64> irqs;
+        const QStringList entries = QDir(s_irqPath).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QString &irq : entries) {
+            QFile actions(QString(s_irqPath + u'/' + irq + u"/actions"));
+            if (!actions.open(QIODevice::ReadOnly)) {
+                continue;
+            }
+            const QString name = QString::fromLatin1(actions.readAll()).trimmed().toLower();
+            if (name.isEmpty()) {
+                continue;
+            }
+            // Only the handful of IRQs a human can physically trigger. Anything
+            // not on this list is background and must not force the screen on.
+            if (!(name.contains(u"pwrkey"_s) || name.contains(u"powerkey"_s) || name.contains(u"resin"_s)
+                  || name.contains(u"gpio_keys"_s) || name.contains(u"gpio-keys"_s) || name.contains(u"volume"_s)
+                  || name.contains(u"fp_detect"_s))) {
+                continue;
+            }
+
+            QFile counts(QString(s_irqPath + u'/' + irq + u"/per_cpu_count"));
+            if (!counts.open(QIODevice::ReadOnly)) {
+                continue;
+            }
+            qint64 total = 0;
+            const QList<QByteArray> percpu = counts.readAll().trimmed().split(',');
+            for (const QByteArray &c : percpu) {
+                total += c.trimmed().toLongLong();
+            }
+            // Key on irq+name, not name alone: two controllers can expose the
+            // same handler name, and aggregating them would hide a delta.
+            irqs.insert(irq + u':' + name, total);
+        }
+
+        if (active) {
+            m_userIrqCounts = irqs;
+            m_userIrqFired = false;
+            m_userIrqFiredNames.clear();
+        } else {
+            m_userIrqFiredNames.clear();
+            for (auto it = irqs.cbegin(); it != irqs.cend(); ++it) {
+                if (it.value() > m_userIrqCounts.value(it.key(), it.value())) {
+                    m_userIrqFiredNames << it.key();
+                }
+            }
+            m_userIrqFired = !m_userIrqFiredNames.isEmpty();
+            m_userIrqCounts = irqs;
+        }
+    }
+
     if (!active) {
         // (A) FALLBACK: on some SoCs (Qualcomm msm) /sys/class/wakeup/*/wakeup_count
         // never increments, so the loop above finds nothing. Ask the SoC instead.
@@ -245,13 +302,27 @@ void SuspendController::snapshotWakeupCounts(bool active)
         }
         qCDebug(POWERDEVIL) << "Wakeup source of type" << lastWakeupType() << "resumed from sleep, devices:" << m_lastWakeupSources
                             << "power-supply online changed:" << m_powerSupplyChanged
-                            << "debug wakeup delta:" << m_debugWakeupDelta;
+                            << "debug wakeup delta:" << m_debugWakeupDelta << "input IRQs fired:" << m_userIrqFiredNames;
     }
 }
 #endif
 
 SuspendController::WakeupSources SuspendController::lastWakeupType()
 {
+    // (0/I) POSITIVE EVIDENCE FIRST. Every other path here works by elimination:
+    // it looks for a background source to blame and, failing to find one, leaves
+    // UnknownSource so the screen comes on. That inverts badly on this SoC --
+    // last_resume_reason is empty on ~3 of every 4 resumes, so path (D) ORs
+    // whatever background chatter happened to tick into Telephony|Network and the
+    // screen stays dark on a genuine press.
+    //
+    // An advanced input IRQ is direct proof a human pressed something, so it wins
+    // outright and short-circuits before any suppression can apply.
+    if (m_userIrqFired) {
+        qCDebug(POWERDEVIL) << "input IRQ advanced across suspend - user intent:" << m_userIrqFiredNames;
+        return WakeupSources(WakeupSource::UnknownSource);
+    }
+
     WakeupSources sources = WakeupSource::UnknownSource;
     for (const QString &wakeupDevice : m_lastWakeupSources) {
         UdevQt::Device device = m_udevClient->deviceBySysfsPath(wakeupDevice);

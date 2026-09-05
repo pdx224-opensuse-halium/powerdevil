@@ -276,6 +276,13 @@ void HandleButtonEvents::checkOutputs()
 
 void HandleButtonEvents::onResumeFromSuspend()
 {
+    // pdx224 (F): drop any timeout left over from a PREVIOUS resume before
+    // deciding anything. Without this a stale 30 s re-suspend timer survives the
+    // suspend and fires seconds after the user wakes the phone by hand, and
+    // repeated suppressed wakes stack up duplicate timers. See the patch notes.
+    qCDebug(POWERDEVIL) << "pdx224 (F) clearing stale re-suspend timeouts on resume";
+    unregisterIdleTimeouts();
+
     // We start with type of resume, if we find we don't like we ask it to suspend directly.
     const auto wakeupType = core()->suspendController()->lastWakeupType();
     if (wakeupType & SuspendController::WakeupSource::Network || wakeupType & SuspendController::WakeupSource::Telephony

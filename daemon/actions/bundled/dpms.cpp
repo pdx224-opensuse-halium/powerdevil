@@ -274,6 +274,14 @@ void DPMS::onResumeFromSuspend()
     } else if (wakeupType & SuspendController::WakeupSource::Network) {
         qCDebug(POWERDEVIL) << "Wakeup was from network source, not turning on display, consumer will turn on if required";
         return;
+    } else if (wakeupType & SuspendController::WakeupSource::PowerManagement) {
+        // pdx224: battery-level / charger-notifier / thermal-watchdog wakes. On a
+        // phone these fire constantly and must NOT light the panel. A real charger
+        // plug/unplug never reaches here -- SuspendController returns UnknownSource
+        // for those (it checks power_supply `online` for an actual transition), so
+        // plugging in still wakes the screen.
+        qCDebug(POWERDEVIL) << "Wakeup was from power management (no plug/unplug), not turning on display";
+        return;
     }
     m_dpms->switchMode(KScreen::Dpms::On);
     registerStandardIdleTimeout();

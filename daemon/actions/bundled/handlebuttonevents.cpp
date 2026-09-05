@@ -279,8 +279,13 @@ void HandleButtonEvents::onResumeFromSuspend()
     // We start with type of resume, if we find we don't like we ask it to suspend directly.
     const auto wakeupType = core()->suspendController()->lastWakeupType();
     if (wakeupType & SuspendController::WakeupSource::Network || wakeupType & SuspendController::WakeupSource::Telephony
-        || wakeupType & SuspendController::WakeupSource::Timer) {
-        qCDebug(POWERDEVIL) << "HandleButtonEvents wakeupType" << wakeupType << "waiting for user input now";
+        || wakeupType & SuspendController::WakeupSource::Timer
+        // pdx224: (E) must match the DPMS suppression list, otherwise a suppressed
+        // wake arms no timer at all and the device stays awake with a black screen
+        // until the user touches it. See the patch notes.
+        || wakeupType & SuspendController::WakeupSource::PowerManagement) {
+        qCDebug(POWERDEVIL) << "HandleButtonEvents wakeupType" << wakeupType
+                            << "waiting for user input now [pdx224 (E) re-suspend armed]";
         // set idle timeout of 30s, if we don't get any activity from user, we shut down
         // This is also enough time for consumer of such wakeup events to register a user activity
         // and wakeup system fully (DPMS on).

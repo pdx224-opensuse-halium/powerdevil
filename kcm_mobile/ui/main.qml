@@ -145,6 +145,71 @@ SimpleKCM {
             }
         }
 
+        // (K) pdx224: charge limiting via Sony's LRC interface. Applies on change
+        // -- this KCM has no Apply button (setButtons(NoAdditionalButton)).
+        FormCard.FormHeader {
+            title: i18n("Battery Charge Limit")
+            visible: kcm.isChargeStopThresholdSupported
+        }
+
+        FormCard.FormCard {
+            visible: kcm.isChargeStopThresholdSupported
+
+            // ComboBox, NOT FormSpinBoxDelegate. Two reasons, one of them fatal:
+            //
+            //  1. FormSpinBoxDelegate is BROKEN in the kirigami-addons on this
+            //     image. Its own +/- buttons call spinbox.increase()/decrease(),
+            //     which do not exist on this Qt's QQC2.SpinBox:
+            //         FormSpinBoxDelegate.qml:171: TypeError: Property 'increase'
+            //         of object SpinBox is not a function
+            //     so the arrows are inert no matter what we bind to them, and
+            //     `editable` defaults to false so typing does nothing either.
+            //  2. Thresholds are coarse (5% steps) and this is a touch screen.
+            //
+            // ONE control only. The daemon already derives the resume point:
+            //     if start <= 0 or start >= stop: start = max(1, stop - 5)
+            // so writing start=0 means "auto 5-point band below stop" and there
+            // is nothing for a second dropdown to usefully express. A resume
+            // point is REQUIRED (start == stop would restart charging the
+            // instant it stopped and cycle the charger every poll), it just does
+            // not need to be a user decision.
+            //
+            // Use onActivated (emitted ONLY on user selection). currentIndex is a
+            // binding, and ExternalServiceSettings::load() is an ASYNC KAuth job:
+            // at startup the property still holds the "unsupported" sentinel (-1),
+            // so an onCurrentIndexChanged handler would fire on the initial clamp
+            // and write a bogus threshold back before the load ever returned.
+            FormCard.FormComboBoxDelegate {
+                id: chargeLimitCombo
+                text: i18nc("@label:listbox Stop charging once the battery reaches this percentage", "Charge limit")
+                textRole: "text"
+                valueRole: "value"
+                // 100% == charge normally, no limit. The daemon reads stop>=100
+                // as disabled, so this needs no separate on/off switch.
+                model: Array.from({length: 11}, function(_, i) {
+                    var v = 50 + i * 5;
+                    return {
+                        text: v === 100 ? i18nc("@item:inlistbox No charge limit", "100% (no limit)")
+                                        : i18nc("@item:inlistbox Charge percentage, %1 is a number", "%1%", v),
+                        value: v
+                    };
+                })
+                currentIndex: Math.max(0, Math.round((kcm.externalServiceSettings.chargeStopThreshold - 50) / 5))
+
+                onActivated: (index) => {
+                    if (!kcm.isChargeStopThresholdSupported) {
+                        return;
+                    }
+                    kcm.externalServiceSettings.chargeStopThreshold = model[index].value;
+                    // 0 = "let the daemon pick the resume point".
+                    if (kcm.isChargeStartThresholdSupported) {
+                        kcm.externalServiceSettings.chargeStartThreshold = 0;
+                    }
+                    kcm.saveChargeThresholds();
+                }
+            }
+        }
+
         FormCard.FormHeader {
             title: i18n("Power Profile")
             visible: kcm.isPowerProfileSupported

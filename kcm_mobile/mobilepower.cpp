@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2020 Tomaz Canabrava <tcanabrava@kde.org>
 
 #include "mobilepower.h"
+#include "ExternalServiceSettings.h" // (K) pdx224, from kcm/
 #include "PowerProfileModel.h"
 #include "statisticsprovider.h"
 
@@ -60,10 +61,23 @@ MobilePower::MobilePower(QObject *parent, const KPluginMetaData &metaData)
     : KQuickConfigModule(parent, metaData)
     , m_batteries{new BatteryModel(this)}
     , m_powerProfileModel{new PowerProfileModel(this)}
+    , m_externalServiceSettings{new PowerDevil::ExternalServiceSettings(this)} // (K) pdx224
 {
     qmlRegisterUncreatableType<BatteryModel>("org.kde.kcm.power.mobile.private", 1, 0, "BatteryModel", QStringLiteral("Use BatteryModel"));
     qmlRegisterUncreatableType<Solid::Battery>("org.kde.kcm.power.mobile.private", 1, 0, "Battery", QStringLiteral(""));
     qmlRegisterType<StatisticsProvider>("org.kde.kcm.power.mobile.private", 1, 0, "HistoryModel");
+
+    // (K) pdx224: ExternalServiceSettings::load() answers ASYNCHRONOUSLY (KAuth
+    // job), so support is unknown at construction. Without these forwards the
+    // charge-limit section evaluates visible:false once and never re-evaluates.
+    connect(m_externalServiceSettings,
+            &PowerDevil::ExternalServiceSettings::isChargeStopThresholdSupportedChanged,
+            this,
+            &MobilePower::isChargeStopThresholdSupportedChanged);
+    connect(m_externalServiceSettings,
+            &PowerDevil::ExternalServiceSettings::isChargeStartThresholdSupportedChanged,
+            this,
+            &MobilePower::isChargeStartThresholdSupportedChanged);
 
     connect(m_powerProfileModel, &QAbstractListModel::modelReset, this, &MobilePower::isPowerProfileSupportedChanged);
     connect(m_powerProfileModel, &QAbstractListModel::modelReset, this, &MobilePower::powerProfileIdxChanged);
@@ -96,11 +110,41 @@ void MobilePower::load()
     m_suspendSessionTime = m_settingsAC->autoSuspendIdleTimeoutSec();
 
     m_powerProfile = m_settingsAC->powerProfile();
+
+    m_externalServiceSettings->load(); // (K) pdx224
+}
+
+// (K) pdx224 -------------------------------------------------------------
+QObject *MobilePower::externalServiceSettings() const
+{
+    return m_externalServiceSettings;
+}
+
+bool MobilePower::isChargeStopThresholdSupported() const
+{
+    return m_externalServiceSettings->isChargeStopThresholdSupported();
+}
+
+bool MobilePower::isChargeStartThresholdSupported() const
+{
+    return m_externalServiceSettings->isChargeStartThresholdSupported();
+}
+
+void MobilePower::saveChargeThresholds()
+{
+    // No-op unless a threshold actually changed (isSaveNeeded), and deliberately
+    // NOT MobilePower::save() -- that would also rewrite all three profile
+    // settings groups as a side effect of changing a charge limit.
+    m_externalServiceSettings->save();
 }
 
 void MobilePower::save()
 {
     // we set all profiles at the same time, since our UI is a simple global toggle
+    // (K) pdx224: no-op unless a threshold actually changed (isSaveNeeded), so
+    // it is safe on the shared save() path that every other control calls.
+    m_externalServiceSettings->save();
+
     for (auto *settings : m_settings) {
         settings->setDimDisplayIdleTimeoutSec(m_dimScreenTime);
         settings->setDimDisplayWhenIdle(m_dimScreen);

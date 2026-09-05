@@ -27,6 +27,17 @@ inline constexpr QLatin1StringView CONSOLEKIT2_SERVICE("org.freedesktop.ConsoleK
 
 inline static const QLatin1String s_wakeupSysFsPath("/sys/class/wakeup");
 
+// Qualcomm (msm) kernels name the IRQ that resumed the AP here. On those SoCs
+// this is the only working attribution -- /sys/class/wakeup/*/wakeup_count
+// never increments. See the pdx224 patch notes.
+inline static const QLatin1String s_socWakeupReasonPath("/sys/kernel/wakeup_reasons/last_resume_reason");
+
+inline static const QLatin1String s_powerSupplyPath("/sys/class/power_supply");
+
+// Wakeup sources WITH working counters. Unlike /sys/class/wakeup this does
+// increment on this SoC, so it is the fallback of last resort for attribution.
+inline static const QLatin1String s_debugWakeupSourcesPath("/sys/kernel/debug/wakeup_sources");
+
 SuspendController::SuspendController()
     : QObject()
 {
@@ -177,10 +188,91 @@ SuspendController::WakeupSources SuspendController::lastWakeupType()
             sources |= WakeupSource::Telephony;
         } else if (device.driver().contains(u"alarmtimer"_s) || device.driver().contains(u"rtc"_s)) {
             sources |= WakeupSource::Timer;
-        } else if (device.driver().contains(u"ath"_s) || device.driver().contains(u"iwl"_s)) {
+        } else if (device.driver().contains(u"ath"_s) || device.driver().contains(u"iwl"_s) || device.driver().contains(u"qca"_s)
+                   || device.driver().contains(u"cnss"_s)) {
             sources |= WakeupSource::Network;
         }
     }
+
+    // (B) A genuine charger plug/unplug MUST still light the display, so bail out
+    // before any suppression below. Only an actual `online` transition counts --
+    // battery-level ticks and charger-notifier chatter leave it unchanged.
+    if (m_powerSupplyChanged) {
+        qCDebug(POWERDEVIL) << "power-supply online changed (plug/unplug) - treating as user-visible";
+        return sources;
+    }
+
+    // (A) SoC fallback (Qualcomm): classify from the IRQ name, e.g. "40 ipa",
+    // "305 threshold", "306 pm8xxx_rtc_alarm", "302 pmic_pwrkey".
+    if (sources == WakeupSources(WakeupSource::UnknownSource) && !m_socWakeupReason.isEmpty()) {
+        const QString reason = m_socWakeupReason.toLower();
+        auto has = [&reason](const char *needle) {
+            return reason.contains(QLatin1String(needle));
+        };
+
+        // User intent MUST stay UnknownSource: the display is SUPPOSED to come on
+        // when the user presses the power button or touches the fingerprint reader.
+        if (has("pwrkey") || has("resin") || has("gpio_keys") || has("gpio-keys") || has("fp_detect")) {
+            return sources;
+        }
+
+        if (has("rtc") || has("alarm")) {
+            sources |= WakeupSource::Timer;
+        }
+        // ipa/gsi are Qualcomm's IP accelerator; it carries BOTH the WiFi and the
+        // cellular data path, so either way it is network traffic.
+        if (has("ipa") || has("gsi") || has("wlan") || has("cnss") || has("pcie") || has("wifi")) {
+            sources |= WakeupSource::Network;
+        }
+        if (has("modem") || has("mss") || has("qrtr") || has("smp2p") || has("rpmsg") || has("glink")) {
+            sources |= WakeupSource::Telephony;
+        }
+        // adc_tm threshold / battery-current-limit / thermal watchdogs
+        if (has("threshold") || has("bcl") || has("therm") || has("temp") || has("adc") || has("batt") || has("charger")) {
+            sources |= WakeupSource::PowerManagement;
+        }
+    }
+
+    // (D) LAST RESORT: last_resume_reason is frequently EMPTY on this SoC, and
+    // m_lastWakeupSources is always empty, so classify from the debugfs
+    // wakeup_sources names that advanced across the suspend. Measured examples:
+    //   qrtr_ws / ta_qmi_wakelock / rmt_storage_* -> modem      (Telephony)
+    //   qcom_rx_wakelock / wlan_* / mgmt_txrx     -> wifi       (Network)
+    //   IPA_* / rmnet_*                           -> data path  (Network)
+    //   battery / *battery_charger / pmic_glink   -> battery    (PowerManagement)
+    // NOTE eventpoll/NETLINK/hal_bluetooth_lock/qup_uart advance on EVERY resume
+    // (they are userspace and BT-hook noise) and deliberately match nothing here.
+    if (sources == WakeupSources(WakeupSource::UnknownSource)) {
+        for (const QString &name : m_debugWakeupDelta) {
+            const QString n = name.toLower();
+            auto has = [&n](const char *needle) {
+                return n.contains(QLatin1String(needle));
+            };
+
+            // user intent first -- never suppress these
+            if (has("powerkey") || has("pwrkey") || has("resin") || has("gpio_keys") || has("fp_detect")) {
+                return WakeupSources(WakeupSource::UnknownSource);
+            }
+            if (has("rtc") || has("alarm")) {
+                sources |= WakeupSource::Timer;
+            }
+            if (has("qrtr") || has("qmi") || has("rmt_storage") || has("smp2p") || has("glink") || has("modem")
+                || has("sscrpcd")) {
+                sources |= WakeupSource::Telephony;
+            }
+            if (has("wlan") || has("qcom_rx") || has("mgmt_txrx") || has("vdev") || has("cnss") || has("ipa")
+                || has("rmnet")) {
+                sources |= WakeupSource::Network;
+            }
+            if (has("battery") || has("charger") || has("pmic_glink") || has("therm") || has("bcl")) {
+                sources |= WakeupSource::PowerManagement;
+            }
+        }
+        if (sources != WakeupSources(WakeupSource::UnknownSource)) {
+            qCDebug(POWERDEVIL) << "classified from debugfs wakeup_sources delta:" << m_debugWakeupDelta;
+        }
+    }
+
     return sources;
 }
 

@@ -82,6 +82,18 @@ private:
 #endif
     QHash<QString, int> m_wakeupCounts;
     QStringList m_lastWakeupSources;
+    // (A) Qualcomm-only: /sys/kernel/wakeup_reasons/last_resume_reason, used when
+    // the generic /sys/class/wakeup diffing yields no candidates at all.
+    QString m_socWakeupReason;
+    // (B) power_supply <name> -> "online", sampled at suspend. Distinguishes a real
+    // charger plug/unplug (online changed) from battery-level noise (unchanged).
+    QHash<QString, QString> m_powerSupplyOnline;
+    bool m_powerSupplyChanged = false;
+    // (D) /sys/kernel/debug/wakeup_sources <name> -> active_count, sampled at
+    // suspend; on resume m_debugWakeupDelta holds the names that advanced. This is
+    // the ONLY place the wake source is visible when last_resume_reason is empty.
+    QHash<QString, qint64> m_debugWakeupCounts;
+    QStringList m_debugWakeupDelta;
     UdevQt::Client *m_udevClient;
 };
 

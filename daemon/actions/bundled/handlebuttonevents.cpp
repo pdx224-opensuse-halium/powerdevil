@@ -29,7 +29,9 @@
 using namespace Qt::StringLiterals;
 using namespace std::chrono_literals;
 
-static constexpr std::chrono::milliseconds s_minIdleTimeWithWakeups = 30s;
+// pdx224 (G): was 30s. At 36 background wakes/28min that held the AP awake
+// 66% of idle time. See the patch notes and power/ANDROID-SUSPEND-REFERENCE.md.
+static constexpr std::chrono::milliseconds s_minIdleTimeWithWakeups = 3s;
 
 namespace PowerDevil::BundledActions
 {

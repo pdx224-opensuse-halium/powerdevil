@@ -30,6 +30,57 @@ static const QString s_chargeTypesFilename = QStringLiteral("charge_types");
 static const QByteArray s_chargeTypeStandard = QByteArrayLiteral("Standard");
 static const QByteArray s_chargeTypeCustom = QByteArrayLiteral("Custom");
 
+// ------------------------------------------------------------ pdx224 (H) --
+// Sony LRC backend. See the pdx224 patch notes and chargelimit/CHARGE-LIMIT.md.
+// getBatteries() still returns nothing on this device (no charge_control_*
+// _threshold attributes), which is why every path below is a separate branch
+// rather than an extra battery entry.
+static const QString s_pdx224LrcPath = QStringLiteral("/sys/class/battchg_ext/lrc_charge_disable");
+static const QString s_pdx224StateDir = QStringLiteral("/var/lib/pdx224-chargelimit");
+static const QString s_pdx224StopFile = QStringLiteral("/var/lib/pdx224-chargelimit/stop_threshold");
+static const QString s_pdx224StartFile = QStringLiteral("/var/lib/pdx224-chargelimit/start_threshold");
+
+static bool pdx224Available()
+{
+    return QFile::exists(s_pdx224LrcPath);
+}
+
+static int pdx224ReadThreshold(const QString &path, int fallback)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return fallback;
+    }
+
+    int value = -1;
+    QTextStream stream(&file);
+    stream >> value;
+
+    if (value < 0 || value > 100) {
+        return fallback;
+    }
+    return value;
+}
+
+static bool pdx224WriteThreshold(const QString &path, int value)
+{
+    // The daemon has StateDirectory= so this normally exists already; mkpath
+    // covers the case where the UI is used before the service first starts.
+    QDir().mkpath(s_pdx224StateDir);
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        qWarning() << "pdx224: failed to open" << path << "for writing";
+        return false;
+    }
+
+    if (file.write(QByteArray::number(value)) == -1) {
+        qWarning() << "pdx224: failed to write threshold into" << path;
+        return false;
+    }
+    return true;
+}
+
 ChargeThresholdHelper::ChargeThresholdHelper(QObject *parent)
     : QObject(parent)
 {
@@ -151,6 +202,19 @@ ActionReply ChargeThresholdHelper::getthreshold(const QVariantMap &args)
 {
     Q_UNUSED(args);
 
+    // (H) pdx224: no kernel thresholds exist, so answer from the daemon's state
+    // files instead of reporting the feature unsupported. stop=100/start=0 is
+    // how "no limit configured" is expressed, which is what upstream's UI reads
+    // as switched off.
+    if (pdx224Available()) {
+        ActionReply pdx224Reply;
+        pdx224Reply.setData({
+            {u"chargeStartThreshold"_s, pdx224ReadThreshold(s_pdx224StartFile, 0)},
+            {u"chargeStopThreshold"_s, pdx224ReadThreshold(s_pdx224StopFile, 100)},
+        });
+        return pdx224Reply;
+    }
+
     QMap<QString, int> stopThresholds = getThresholds(s_chargeEndThreshold);
 
     // In the rare case there are multiple batteries with varying charge thresholds, try to use something sensible
@@ -202,6 +266,23 @@ ActionReply ChargeThresholdHelper::setthreshold(const QVariantMap &args)
             auto reply = ActionReply::HelperErrorReply(); // is there an "invalid arguments" error?
             reply.setErrorDescription(QStringLiteral("Invalid thresholds provided"));
             return reply;
+        }
+
+        // (H) pdx224: persist for pdx224-chargelimit.service and return. We do
+        // NOT write lrc_charge_disable here -- the daemon owns the hardware, and
+        // two writers on one votable is how you get a phone that will not charge.
+        if (pdx224Available()) {
+            if (hasStopThreshold && !pdx224WriteThreshold(s_pdx224StopFile, stopThreshold)) {
+                auto reply = ActionReply::HelperErrorReply();
+                reply.setErrorDescription(QStringLiteral("Failed to write pdx224 stop charge threshold"));
+                return reply;
+            }
+            if (hasStartThreshold && !pdx224WriteThreshold(s_pdx224StartFile, startThreshold)) {
+                auto reply = ActionReply::HelperErrorReply();
+                reply.setErrorDescription(QStringLiteral("Failed to write pdx224 start charge threshold"));
+                return reply;
+            }
+            return ActionReply();
         }
 
         if (hasStartThreshold && !setThresholds(s_chargeStartThreshold, startThreshold)) {

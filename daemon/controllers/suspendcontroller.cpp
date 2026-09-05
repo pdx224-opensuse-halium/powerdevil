@@ -171,8 +171,81 @@ void SuspendController::snapshotWakeupCounts(bool active)
         }
     }
 
+    // (B) sample every power_supply "online" so we can tell a genuine charger
+    // plug/unplug from battery-level noise that merely ticks the same sources.
+    {
+        QHash<QString, QString> online;
+        const QStringList supplies = QDir(s_powerSupplyPath).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QString &supply : supplies) {
+            QFile f(QString(s_powerSupplyPath + u'/' + supply + u"/online"));
+            if (f.open(QIODevice::ReadOnly)) {
+                online.insert(supply, QString::fromLatin1(f.readAll()).trimmed());
+            }
+        }
+        if (active) {
+            m_powerSupplyOnline = online;
+            m_powerSupplyChanged = false;
+        } else {
+            m_powerSupplyChanged = (online != m_powerSupplyOnline);
+            m_powerSupplyOnline = online;
+        }
+    }
+
+    // (D) sample /sys/kernel/debug/wakeup_sources. Columns are:
+    //   name  active_count  event_count  wakeup_count  expire_count  ...
+    // Names repeat (several `qrtr_ws` rows), so aggregate by name. This counter
+    // DOES move on this SoC, unlike /sys/class/wakeup/*/wakeup_count.
+    {
+        QHash<QString, qint64> counts;
+        QFile f(s_debugWakeupSourcesPath);
+        if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            f.readLine(); // header
+            while (!f.atEnd()) {
+                const QString line = QString::fromLatin1(f.readLine());
+                // simplified() collapses tab/space runs -- avoids needing QRegularExpression
+                const QStringList col = line.simplified().split(u' ', Qt::SkipEmptyParts);
+                if (col.size() < 3) {
+                    continue;
+                }
+                bool ok = false;
+                const qint64 active = col.at(1).toLongLong(&ok);
+                if (ok) {
+                    counts[col.at(0)] += active;
+                }
+            }
+        }
+        if (active) {
+            m_debugWakeupCounts = counts;
+            m_debugWakeupDelta.clear();
+        } else {
+            m_debugWakeupDelta.clear();
+            for (auto it = counts.cbegin(); it != counts.cend(); ++it) {
+                if (it.value() > m_debugWakeupCounts.value(it.key(), 0)) {
+                    m_debugWakeupDelta << it.key();
+                }
+            }
+            m_debugWakeupCounts = counts;
+        }
+    }
+
     if (!active) {
-        qCDebug(POWERDEVIL) << "Wakeup source of type" << lastWakeupType() << "resumed from sleep, devices:" << m_lastWakeupSources;
+        // (A) FALLBACK: on some SoCs (Qualcomm msm) /sys/class/wakeup/*/wakeup_count
+        // never increments, so the loop above finds nothing. Ask the SoC instead.
+        // Read it here, at PrepareForSleep(false): the node is only valid
+        // immediately after resume.
+        m_socWakeupReason.clear();
+        if (m_lastWakeupSources.isEmpty()) {
+            QFile reasonFile(s_socWakeupReasonPath);
+            if (reasonFile.open(QIODevice::ReadOnly)) {
+                m_socWakeupReason = QString::fromLatin1(reasonFile.readAll()).trimmed();
+                if (!m_socWakeupReason.isEmpty()) {
+                    qCDebug(POWERDEVIL) << "No /sys/class/wakeup candidates; SoC wakeup reason:" << m_socWakeupReason;
+                }
+            }
+        }
+        qCDebug(POWERDEVIL) << "Wakeup source of type" << lastWakeupType() << "resumed from sleep, devices:" << m_lastWakeupSources
+                            << "power-supply online changed:" << m_powerSupplyChanged
+                            << "debug wakeup delta:" << m_debugWakeupDelta;
     }
 }
 #endif
